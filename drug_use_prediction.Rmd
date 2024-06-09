@@ -1,0 +1,360 @@
+---
+title: "Data Mining and Machine Learning I - Project"
+output:
+    pdf_document:
+        fig_caption: yes
+---
+
+```{r, include=FALSE}
+knitr::opts_chunk$set(echo = FALSE, warning = FALSE, message = FALSE)
+```
+
+```{r}
+
+library(ggplot2)
+library(dplyr)
+library(corrplot) 
+library(tidyr)
+library(e1071)
+library(randomForest)
+library(rpart)
+library(class)
+library(pROC)
+library(corrplot)
+library(gridExtra)
+library(gt)
+library(naniar)
+library(GGally)
+library(MASS)
+library(knitr)
+library(kableExtra)
+library(caret)
+library(rpart.plot)
+
+set.seed(11)
+```
+
+## Introduction
+
+Navigating the challenges of healthcare costs, particularly those associated with hospital admissions, necessitates a keen understanding of the factors contributing to drug addiction. In the realm of this project, we employed various classification algorithms with the purpose of predicting potential drug usage among future patients, and we critically assessed each one to select the model with the most promising potential for future performance.
+
+The dataset we used contains information on 600 patients. For each patient we are provided with 11 features: age, education, country of origin, ethnicity, nscore, escore, oscore, ascore, cscore, impulsivity, and sensation seeing, as well as a class label which indicates drug use as "Never Used" (a value of 0), or "Used at some point" (a value of 1).
+
+## Exploratory Analysis
+
+An overview of the available data for the first 6 patients can be seen below. The dataset has no missing values, and is perfectly balanced between the two classes, as 50% of the entries belong to class 0 and 50% to class 1.
+
+```{r}
+
+data = read.csv(url("https://docs.google.com/uc?id=1lUpi4-dA5sJ2WfCYGLdQcniVKNsYoC0b&export=download"))
+
+head(data)
+```
+
+```{r}
+
+# remove patient id
+data = data[,-1]
+
+# move Class to the front
+data <- data %>% relocate("Class")
+
+data$Class = as.factor(data$Class)
+```
+
+```{r, results='hide'}
+
+miss_case_table(data)
+miss_var_table(data)
+```
+
+```{r, results='hide'}
+
+prop.table(table(data$Class))
+```
+
+We split the data into 3 parts: a training dataset to fit our classification model, a validation dataset to select the model with the best performance, and a testing dataset to estimate the future performance of the selected model.
+
+```{r}
+
+n = nrow(data)
+
+train.ind = sample(c(1:n), round(n/2), replace = FALSE)
+valid.ind = sample(c(1:n)[-train.ind], round(n/4), replace = FALSE)
+test.ind = setdiff(c(1:n), c(train.ind,valid.ind))
+
+train.data = data[train.ind,]
+valid.data = data[valid.ind,]
+test.data = data[test.ind,]
+```
+
+Before starting to fit our models, we investigated the nature of our training data.
+
+Figure 1 shows the correlation matrix of our variables. We notice that some features are correlated with one another, e.g. `SS` and `Impulsive` , `Oscore` and `X.Country`. However their correlation is not strong enough to be a cause of concern, as it does not exceed 0.6. More importantly, we examine the correlation of the features with the `Class` variable. We notice that `Escore` and `Ethnicity` have extremely low correlation with `Class`, which indicates they might not be beneficial for our classification task at all. In contrast, the features that display the highest correlation with `Class` (and are thus likely to be the most important ones for our task) are `Age` , `X.Country` and `SS`. 
+
+```{r, fig.cap="Correlation matrix of all variables"}
+
+corr.data = train.data
+corr.data$Class = as.numeric(corr.data$Class)
+corrplot(cor(corr.data))
+```
+
+Figure 2 shows the distribution of our available features for each of the two classes. What we were interested to see here is whether there is an observable difference between the two class distributions of each feature. We notice that for `Ethnicity` and `Escore` the two histograms are almost completely overlapped, while in the rest of the features there is some degree of separation between the two classes, especially in `X.Country` and `Age`. These indications agree with what we observed in the correlation matrix above. Thus, we excluded `Ethnicity` and `Escore` and continued our analysis with the rest of the variables.
+
+```{r, fig.height=15, fig.width=8, fig.cap="Distribution of all features across classes"}
+
+p1 = ggplot(train.data, aes(x=Age, group = Class, color=Class, fill=Class)) + geom_density(alpha=0.6)
+p2 = ggplot(train.data, aes(x=Education, group = Class, color=Class, fill=Class)) + geom_density(alpha=0.6)
+p3 = ggplot(train.data, aes(x=X.Country, group = Class, color=Class, fill=Class)) + geom_density(alpha=0.6)
+p4 = ggplot(train.data, aes(x=Ethnicity, group = Class, color=Class, fill=Class)) + geom_density(alpha=0.6)
+p5 = ggplot(train.data, aes(x=Nscore, group = Class, color=Class, fill=Class)) + geom_density(alpha=0.6)
+p6 = ggplot(train.data, aes(x=Escore, group = Class, color=Class, fill=Class)) + geom_density(alpha=0.6)
+p7 = ggplot(train.data, aes(x=Oscore, group = Class, color=Class, fill=Class)) + geom_density(alpha=0.6)
+p8 = ggplot(train.data, aes(x=Ascore, group = Class, color=Class, fill=Class)) + geom_density(alpha=0.6)
+p9 = ggplot(train.data, aes(x=Cscore, group = Class, color=Class, fill=Class)) + geom_density(alpha=0.6)
+p10 = ggplot(train.data, aes(x=Impulsive, group = Class, color=Class, fill=Class)) + geom_density(alpha=0.6)
+p11 = ggplot(train.data, aes(x=SS, group = Class, color=Class, fill=Class)) + geom_density(alpha=0.6)
+
+grid.arrange(grobs = list(p1, p2, p3, p4, p5, p6, p7, p8, p9, p10, p11), nrow = 6)
+```
+
+```{r}
+
+train.data =  train.data[, !(colnames(train.data) %in% c('Ethnicity', 'Escore'))]
+valid.data = valid.data[, !(colnames(valid.data) %in% c('Ethnicity', 'Escore'))]
+test.data = test.data[, !(colnames(test.data) %in% c('Ethnicity', 'Escore'))]
+```
+
+## Classification
+
+The classification algorithms we explored using are: k-nearest neighbors, decision trees, support vector machines and discriminant analysis.
+
+### a) k-nearest neighbors
+
+The results of the k-nearest neighbors (k-NN) algorithm are greatly dependent on the choice of the `k` parameter, i.e. the number of neighboring points that are taken into consideration when deciding the class a new point belongs to. Different values of `k` may result in completely different classification boundaries.
+
+In our case, we tuned `k` using a grid-search approach with 10-fold cross-validation.
+
+```{r}
+
+knn_model <- train(Class ~ ., data = train.data, method = "knn", trControl = trainControl(method = "cv", number = 10), tuneGrid = expand.grid(k = 1:10))$finalModel
+```
+
+### b) decision trees
+
+There are several parameters that affect the performance of the decision tree algorithm. Some of the most important ones are:
+
+-   `minsplit`, i.e. the minimum number of observations that must exist in a node in order for a split to be attempted.
+
+-   `minbucket` , i.e. the minimum number of observations in any terminal node of the tree.
+
+-   and `cp` , i.e. the threshold for the improvement of the model's fit; any split that does not decrease the overall lack of fit by a factor of `cp` is not attempted.
+
+In our case, we did not go into depth on tuning `minsplit` and `minbucket`. Instead, we handpicked them to be 5% and 1% of our total training data points respectively.
+
+We did however look into cross-validation results to select a `cp` that ensures our tree generalizes well to new data but is not overly complex. A common strategy is to select the smallest tree (i.e., the one with the fewest splits) within one standard deviation of the minimum cross-validation error. In our case, the minimum cross-validation error is 0.556 when `cp` is 0.021. The standard deviation at this point is 0.053. So, we selected the smallest tree whose cross-validation error is less than or equal to 0.608, which happens to be the one with `cp` equal to 0.021.
+
+```{r}
+
+full_tree = rpart(Class~ ., data = train.data, method = "class",
+    parms = list(split = 'information'), cp = -1, minsplit = 15, minbucket = 3)
+
+# printcp(full_tree)
+
+final_tree = prune(full_tree, cp = 0.021)
+```
+
+We also went one step further by employing the random forest method; an ensemble learning approach of the decision tree algorithm. This method operates by constructing multiple decision trees using random subsets of the data and random subsets of the features, which can potentially lead to a more reliable model.
+
+```{r}
+
+random_forest = randomForest(as.factor(Class)~ ., data = train.data)
+```
+
+### c) support vector machines
+
+Support Vector Machines (SVMs) work by constructing a hyperplane in a high-dimensional space to optimally separate different classes of data points. One of the key features of an SVM is the use of a kernel function to transform the input space, enabling the model to capture complex, non-linear relationships.
+
+In our case, we fitted three SVMs with different kernel functions, since the nature of the relationship between the features and the target variable `Class` is unknown. Each kernel has its own hyperparameters that affect the performance of the resulting model:
+
+-   The *linear* kernel assumes a linear relationship between features and target. Its only parameter is `cost`, which determines the tolerance of the model to missclassification, and thus the chance of overfitting.
+
+-   The *radial* kernel uses a Gaussian function to transform the input space. It has an additional parameter, `gamma`, which controls the width of the Gaussian, determining how much each point influences others around it.
+
+-   The *polynomial* kernel introduces an extra level of complexity, allowing the model to capture polynomial relationships between features and target. In addition to `gamma`, it also has `degree`, which specifies the order of the polynomial, and `coef0`, which controls how much the model is influenced by higher versus lower degree polynomials.
+
+We tuned these using a grid-search approach.
+
+```{r}
+
+linear_svm = tune.svm(
+    as.factor(Class)~., data = train.data, type = "C-classification", kernel = "linear",
+    cost = seq(from = 0.1, to = 1, by = 0.1)
+)$best.model
+```
+
+```{r}
+
+radial_svm = tune.svm(
+    as.factor(Class)~., data = train.data, type = "C-classification", kernel = "radial", 
+    cost = seq(from = 0.1, to = 1, by = 0.1), 
+    gamma = seq(from = 0.1, to = 1, by = 0.1)
+)$best.model
+```
+
+```{r}
+
+poly_svm = tune.svm(
+    as.factor(Class)~., data = train.data, type = "C-classification", kernel = "polynomial",
+    cost = seq(from = 0.1, to = 1, by = 0.1),
+    degree = 2:4,
+    gamma = seq(from = 0.1, to = 1, by = 0.1),
+    coef0 = seq(from = 0, to = 1, by = 0.5)
+)$best.model
+```
+
+### d) discriminant analysis
+
+There are two common types of discriminant analysis: linear discriminant analysis (LDA) and quadratic discriminant analysis (QDA).
+
+-   LDA is based on the premise that each feature's variances are equal across all classes. This implies a linear boundary between the different classes in the data. It is a relatively simple model that can provide robust results as long as the assumption of identical covariance is not greatly violated.
+
+-   QDA, in contrast, does not assume that the different class variances are equal for each feature, which implies a quadratic boundary between the classes. Because it can model more complex relationships, QDA might provide more accurate classification when the equal variance assumption does not hold.
+
+In our case, we refrained from testing the validity of the said assumption and instead fitted both types of models on our data.
+
+```{r}
+
+lda = lda(Class ~ ., data = train.data)
+```
+
+```{r}
+
+qda = qda(Class ~ ., data = train.data)
+```
+
+## Model selection
+
+To evaluate the classification performance of our models, we calculated the following metrics:
+
+-   Accuracy, i.e. the ratio of the number of correct predictions to the total number of predictions; calculated as (True Positives + True Negatives) / (Total number of predictions). This is a useful measure to evaluate the overall correctness of a model's predictions. It can be misleading when the classes are imbalanced, but this is not true in our case.
+
+-   Sensitivity, i.e. the ratio of the correct positive predictions to the total number of true positives; calculated as True Positives / (True Positives + False Negatives). This measures how well a model can predict the positive class.
+
+-   Specificity, i.e. the ratio of the number of correct negative predictions to the total number of true negatives; calculated as True Negatives / (True Negatives + False Positives). This measures how well a model can predict the negative class.
+
+```{r}
+
+# knn evaluation
+pred.valid.knn = predict(knn_model, newdata = valid.data[,-1], type = "class")
+xtab.valid.knn = table(valid.data[,1], pred.valid.knn)
+matrix.knn = confusionMatrix(xtab.valid.knn)
+```
+
+```{r}
+
+# decision tree evaluation
+pred.valid.tree = predict(final_tree, newdata = valid.data[,-1], type = "class")
+xtab.valid.tree = table(valid.data[,1], pred.valid.tree)
+matrix.tree = confusionMatrix(xtab.valid.tree)
+```
+
+```{r}
+
+# random forest evaluation
+pred.valid.forest = predict(random_forest, newdata = valid.data[,-1], type = "class")
+xtab.valid.forest = table(valid.data[,1], pred.valid.forest)
+matrix.forest = confusionMatrix(xtab.valid.forest)
+```
+
+```{r}
+
+# linear svm evaluation
+pred.valid.lsvm = predict(linear_svm, newdata = valid.data[,-1], type = "class")
+xtab.valid.lsvm = table(valid.data[,1], pred.valid.lsvm)
+matrix.lsvm = confusionMatrix(xtab.valid.lsvm)
+```
+
+```{r}
+
+# radial svm evaluation
+pred.valid.rsvm = predict(radial_svm, newdata = valid.data[,-1], type = "class")
+xtab.valid.rsvm = table(valid.data[,1], pred.valid.rsvm)
+matrix.rsvm = confusionMatrix(xtab.valid.rsvm)
+```
+
+```{r}
+
+# polynomial svm evaluation
+pred.valid.psvm = predict(poly_svm, newdata = valid.data[,-1], type = "class")
+xtab.valid.psvm = table(valid.data[,1], pred.valid.psvm)
+matrix.psvm = confusionMatrix(xtab.valid.psvm)
+```
+
+```{r}
+
+# lda evaluation
+pred.valid.lda = predict(lda, newdata = valid.data[,-1], type = "class")
+xtab.valid.lda = table(valid.data[,1], pred.valid.lda$class)
+matrix.lda = confusionMatrix(xtab.valid.lda)
+```
+
+```{r}
+
+# qda evaluation
+pred.valid.qda = predict(qda, newdata = valid.data[,-1], type = "class")
+xtab.valid.qda = table(valid.data[,1], pred.valid.qda$class)
+matrix.qda = confusionMatrix(xtab.valid.qda)
+```
+
+```{r}
+
+model.metrics = format(data.frame(
+    Model = c("k-NN", "decision tree", "random forest", "linear SVM", "radial SVM", "poly SVM", "LDA", "QDA"),
+    bind_rows(
+        c(matrix.knn$overall[1], matrix.knn$byClass[c(1, 2)]),
+        c(matrix.tree$overall[1], matrix.tree$byClass[c(1, 2)]),
+        c(matrix.forest$overall[1], matrix.forest$byClass[c(1, 2)]),
+        c(matrix.lsvm$overall[1], matrix.lsvm$byClass[c(1, 2)]),
+        c(matrix.rsvm$overall[1], matrix.rsvm$byClass[c(1, 2)]),
+        c(matrix.psvm$overall[1], matrix.psvm$byClass[c(1, 2)]),
+        c(matrix.lda$overall[1], matrix.lda$byClass[c(1, 2)]),
+        c(matrix.qda$overall[1], matrix.qda$byClass[c(1, 2)]),
+    )
+), digits = 2)
+
+gt(model.metrics)
+```
+
+The above table shows the values of the performance metrics for each of the models we developed, measured on the validation dataset. The following points can be concluded:
+
+-   With respect to accuracy, the linear SVM model is showing the highest score at 0.79, which means it is predicting drug use more correctly than the other models. The k-NN and QDA models are also performing well with accuracy scores of 0.78 each.
+
+-   With respect to sensitivity, the QDA model has the highest score at 0.81, indicating it is the best at identifying positive instances (future drug users). The k-NN and linear SVM models also have high sensitivity scores of 0.79 each.
+
+-   With respect to specificity, the linear SVM model shows the highest score at 0.78, which means it is the best at identifying negative instances (non drug users) The k-NN and radial SVM models also show high performance with specificity scores of 0.77 each. The QDA model has the second lowest score at 0.75.
+
+In our use case, it is of outmost importance to catch as many true positive cases as possible to ensure that individuals who are likely to struggle with addiction get the help they need. This is crucial because missing a person struggling with addiction could have serious implications, including escalating substance abuse, potential overdoses, and increased healthcare costs down the line. Thus, we selected the QDA model, which has the highest sensitivity score, as the most appropriate.
+
+Evaluating the selected model once more, this time on the testing dataset, we found the following estimates of its future performance: accuracy=0.79, sensitivity=0.73, and specificity=0.83. These values are reasonably high, but in most real healthcare settings we would expect the sensitivity to be much higher.
+
+```{r}
+
+pred.test.qda = predict(qda, newdata = test.data[,-1], type = "class")
+xtab.test.qda = table(test.data[,1], pred.test.qda$class)
+final.matrix.qda = confusionMatrix(xtab.test.qda)
+
+# round(c(final.matrix.qda$overall[1], final.matrix.qda$byClass[c(1, 2, 5)]), 2)
+```
+
+## Discussion
+
+There are several potential improvements we could explore in order to enhance the predictive performance of our models:
+
+-   Applying a dimensionality reduction method, such as Principal Component Analysis (PCA), and then performing the model fitting on the new reduced version of the dataset, might lead to higher-performing models. However, it is important to note that when applying unsupervised methods, such as PCA, the benefit on the classification performance is not guaranteed and the results should be carefully examined.
+
+-   Our study might also benefit from performing outlier detection on our data to improve their reliability. Due to the high number of features in our dataset, visually identifying potential outliers and manually excluding them becomes impractical. We would instead need to employ an advanced automatic outlier detection algorithm.
+
+-   Employing cross-validation techniques, instead of relying on a single split of the data into training, validation, and test sets, would provide a more robust assessment of model performance. By repeatedly partitioning the data into different training and validation sets, and averaging the performance metrics obtained from each iteration, we would end up with a more reliable estimation of each model's performance.
+
+-   Lastly, there is much room for expanding the hyperparameter tuning process in our study. Exhaustively exploring the various combinations of hyperparameters for all the employed classification algorithms would help identify optimal settings we might have overlooked.
